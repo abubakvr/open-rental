@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is a [Next.js](https://nextjs.org) app (**Open Rental**) with MQTT telemetry from an ESP and a small dashboard.
 
-## Getting Started
-
-First, run the development server:
+## Local development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). Run an MQTT broker locally (for example Mosquitto on port 1883), copy `.env.example` to `.env.local`, set `MQTT_URL` (for example `mqtt://127.0.0.1:1883`), then hit `/api/esp/telemetry` once or open `/dashboard` so the server subscribes.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Docker Compose (app + Eclipse Mosquitto)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+From the project root:
+
+```bash
+docker compose up --build
+```
+
+- **Web app:** [http://localhost:3000](http://localhost:3000)
+- **MQTT broker:** port **1883** on the host (`localhost:1883` from your PC).
+
+Inside Compose, the Next.js container uses `MQTT_URL=mqtt://mosquitto:1883`. Your **ESP is not on the Docker network**, so it must use your **computer’s LAN IP** (for example `192.168.1.50`) and port **1883**, not the hostname `mosquitto`.
+
+### Topics (defaults)
+
+| Direction | Topic | Who |
+|-----------|--------|-----|
+| ESP → broker → backend | `open-rental/esp/telemetry` | ESP **publishes** JSON telemetry; the backend **subscribes** |
+| Backend → broker → ESP | `open-rental/esp/commands` | Backend **publishes** events; ESP **subscribes** |
+
+Override with `MQTT_TOPIC_TELEMETRY` and `MQTT_TOPIC_COMMANDS` in Compose or `.env.local`.
+
+### HTTP endpoints for the ESP or other clients
+
+- `GET /api/esp/config` — topic names, paths, and hints (no secrets).
+- `GET /api/esp/telemetry` — last telemetry JSON stored from MQTT.
+- `POST /api/esp/publish` — body `{ "payload": { ... } }` publishes JSON to the commands topic (optional `"topic": "custom/topic"`).
+
+Example publish (from your LAN, replace the IP):
+
+```bash
+curl -s -X POST http://192.168.1.50:3000/api/esp/publish \
+  -H "Content-Type: application/json" \
+  -d '{"payload":{"type":"ping","sentAt":"2026-05-10T12:00:00Z"}}'
+```
+
+### ESP firmware checklist
+
+1. Connect MQTT to `<YOUR_PC_LAN_IP>:1883` (same Wi‑Fi as the broker).
+2. **Publish** telemetry JSON to `open-rental/esp/telemetry` (fields such as `lat`, `lng`, `uptimeSec`, `rssi`).
+3. **Subscribe** to `open-rental/esp/commands` to receive events from the backend.
+4. Optionally call `GET http://<YOUR_PC_LAN_IP>:3000/api/esp/config` to read topic names and paths at runtime.
+
+### Mosquitto configuration
+
+Dev-friendly settings live in `docker/mosquitto/mosquitto.conf` (anonymous access enabled). **Do not expose port 1883 to the internet** without TLS and authentication.
 
 ## Learn More
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [Next.js Documentation](https://nextjs.org/docs)
+- [Eclipse Mosquitto](https://mosquitto.org/)

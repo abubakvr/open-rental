@@ -1,0 +1,27 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+    restart: unless-stopped
+
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      MQTT_URL: mqtt://mosquitto:1883
+      MQTT_TOPIC_TELEMETRY: open-rental/esp/telemetry
+      MQTT_TOPIC_COMMANDS: open-rental/esp/commands
+      # Optional: set so /api/esp/config documents your LAN URL for firmware
+      # NEXT_PUBLIC_APP_URL: http://192.168.1.10:3000
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+volumes:
+  mosquitto_data:
