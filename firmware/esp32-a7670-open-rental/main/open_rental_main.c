@@ -131,6 +131,20 @@ static void feed_modem_bytes(const uint8_t *data, size_t len)
 
 static char s_drain_buf[3072];
 
+/** Set true only after subscribe completes; telemetry publish checks this. */
+static bool s_mqtt_pipeline_ok;
+/** Count consecutive modem MQTT publish failures (dead CMQTT session after RF resets). */
+static int s_mqtt_pub_fail_streak;
+/** Rate-limit telemetry AT publishes so GNSS/radio URC storms don’t wedge CMQTT. */
+static int64_t s_next_telemetry_attempt_ms;
+
+#ifndef TELEMETRY_MIN_OK_INTERVAL_MS
+#define TELEMETRY_MIN_OK_INTERVAL_MS 8000
+#endif
+#ifndef TELEMETRY_RETRY_AFTER_FAIL_MS
+#define TELEMETRY_RETRY_AFTER_FAIL_MS 3500
+#endif
+
 static bool modem_drain_until(const char *needle, int timeout_ms, bool *error_token)
 {
   size_t total = 0;
@@ -209,7 +223,7 @@ static bool modem_interactive_body(const char *at_header, const char *body)
   uart_flush_rx();
   modem_send_line(at_header);
 
-  if (!modem_wait_prompt(">", 8000)) {
+  if (!modem_wait_prompt(">", 20000)) {
     ESP_LOGE(TAG, "No > prompt after: %s", at_header);
     return false;
   }
@@ -339,32 +353,53 @@ static void parse_gps_response(const char *response)
   }
 
   start += strlen("+CGNSSINFO:");
-  while (*start == ' ') {
+  while (*start == ' ' || *start == '\t') {
     start++;
   }
 
-  int status, num_sats;
-  float latitude, longitude;
-  char lat_dir, lon_dir;
-
-  int result =
-      sscanf(start, "%d,%d,%*[^,],%*[^,],%*[^,],%f,%c,%f,%c", &status, &num_sats,
-             &latitude, &lat_dir, &longitude, &lon_dir);
-
-  if (result == 6 && status > 0) {
-    float lat = latitude;
-    float lng = longitude;
-    if (lat_dir == 'S' || lat_dir == 's') {
-      lat = -fabsf(lat);
-    }
-    if (lon_dir == 'W' || lon_dir == 'w') {
-      lng = -fabsf(lng);
-    }
-    s_lat = lat;
-    s_lng = lng;
-    s_have_fix = true;
-    ESP_LOGI(TAG, "GNSS fix: %.7f, %.7f | sats=%d", lat, lng, num_sats);
+  /* No fix yet — SIMCom often reports commas only */
+  if (*start == ',' || *start == '\0' || *start == '\r' || *start == '\n') {
+    return;
   }
+
+  int status = 0;
+  int num_sats = 0;
+  float latitude = 0.0f;
+  float longitude = 0.0f;
+  char lat_dir = 0;
+  char lon_dir = 0;
+
+  /*
+   * A7670E extended fix line looks like:
+   *   3,14,,02,01,6.5275178,N,3.3793924,E,100526,210935.00,...
+   * Older / shorter formats used three dummy fields before lat/lon.
+   */
+  int n = sscanf(start, "%d,%d,,%*[^,],%*[^,],%f,%c,%f,%c", &status, &num_sats,
+                 &latitude, &lat_dir, &longitude, &lon_dir);
+
+  if (n != 6) {
+    n = sscanf(start, "%d,%d,%*[^,],%*[^,],%*[^,],%f,%c,%f,%c", &status,
+               &num_sats, &latitude, &lat_dir, &longitude, &lon_dir);
+  }
+
+  if (n != 6 || status <= 0) {
+    return;
+  }
+
+  float lat = latitude;
+  float lng = longitude;
+  if (lat_dir == 'S' || lat_dir == 's') {
+    lat = -fabsf(lat);
+  }
+  if (lon_dir == 'W' || lon_dir == 'w') {
+    lng = -fabsf(lng);
+  }
+
+  s_lat = lat;
+  s_lng = lng;
+  s_have_fix = true;
+  ESP_LOGI(TAG, "GNSS fix: %.7f, %.7f | status=%d sats=%d", lat, lng, status,
+           num_sats);
 }
 
 static void parse_csq_response(const char *response)
@@ -391,42 +426,76 @@ static int csq_to_dbm_approx(int csq)
   return -113 + 2 * csq;
 }
 
+/** Bring modem back to command mode after GNSS errors / IP events */
+static bool modem_sync_at_ok(void)
+{
+  bool err = false;
+  uart_flush_rx();
+  modem_send_line("AT");
+  return modem_drain_until("OK", 4000, &err) && !err;
+}
+
 static bool mqtt_publish_json_to_topic(const char *topic, const char *json_payload)
 {
-  char hdr[80];
+  uart_flush_rx();
 
-  snprintf(hdr, sizeof(hdr), "AT+CMQTTTOPIC=%d,%d", MQTT_CLIENT_INDEX,
-           (int)strlen(topic));
-  if (!modem_interactive_body(hdr, topic)) {
-    return false;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      ESP_LOGW(TAG, "MQTT publish retry after modem sync");
+      vTaskDelay(pdMS_TO_TICKS(400));
+    }
+
+    if (!modem_sync_at_ok()) {
+      ESP_LOGW(TAG, "AT sync failed before MQTT publish");
+    }
+
+    char hdr[80];
+
+    snprintf(hdr, sizeof(hdr), "AT+CMQTTTOPIC=%d,%d", MQTT_CLIENT_INDEX,
+             (int)strlen(topic));
+    if (!modem_interactive_body(hdr, topic)) {
+      continue;
+    }
+
+    snprintf(hdr, sizeof(hdr), "AT+CMQTTPAYLOAD=%d,%d", MQTT_CLIENT_INDEX,
+             (int)strlen(json_payload));
+    if (!modem_interactive_body(hdr, json_payload)) {
+      continue;
+    }
+
+    char pub[48];
+    snprintf(pub, sizeof(pub), "AT+CMQTTPUB=%d,%d,%d", MQTT_CLIENT_INDEX,
+             MQTT_QOS_PUBLISH, MQTT_PUBLISH_TIMEOUT_SEC);
+    modem_send_line(pub);
+
+    bool err = false;
+    if (!modem_drain_until("+CMQTTPUB:", 25000, &err)) {
+      ESP_LOGE(TAG, "CMQTTPUB timeout");
+      continue;
+    }
+    if (strstr(s_drain_buf, "+CMQTTPUB: 0,0") == NULL) {
+      ESP_LOGW(TAG, "CMQTTPUB unexpected: %s", s_drain_buf);
+    }
+    return !err;
   }
 
-  snprintf(hdr, sizeof(hdr), "AT+CMQTTPAYLOAD=%d,%d", MQTT_CLIENT_INDEX,
-           (int)strlen(json_payload));
-  if (!modem_interactive_body(hdr, json_payload)) {
-    return false;
-  }
-
-  char pub[48];
-  snprintf(pub, sizeof(pub), "AT+CMQTTPUB=%d,%d,%d", MQTT_CLIENT_INDEX,
-           MQTT_QOS_PUBLISH, MQTT_PUBLISH_TIMEOUT_SEC);
-  modem_send_line(pub);
-
-  bool err = false;
-  if (!modem_drain_until("+CMQTTPUB:", 20000, &err)) {
-    ESP_LOGE(TAG, "CMQTTPUB timeout");
-    return false;
-  }
-  if (strstr(s_drain_buf, "+CMQTTPUB: 0,0") == NULL) {
-    ESP_LOGW(TAG, "CMQTTPUB unexpected: %s", s_drain_buf);
-  }
-  return !err;
+  return false;
 }
 
 static void telemetry_publish_if_ready(void)
 {
+  if (!s_mqtt_pipeline_ok) {
+    ESP_LOGD(TAG, "Skip telemetry (MQTT pipeline not up)");
+    return;
+  }
+
   if (!s_have_fix) {
     ESP_LOGD(TAG, "Skip telemetry (no GNSS fix yet)");
+    return;
+  }
+
+  int64_t now_ms = esp_timer_get_time() / 1000;
+  if (now_ms < s_next_telemetry_attempt_ms) {
     return;
   }
 
@@ -441,10 +510,131 @@ static void telemetry_publish_if_ready(void)
 
   if (!mqtt_publish_json_to_topic(MQTT_TOPIC_TELEMETRY, body)) {
     ESP_LOGE(TAG, "Telemetry publish failed");
+    s_mqtt_pub_fail_streak++;
+    s_next_telemetry_attempt_ms =
+        now_ms + TELEMETRY_RETRY_AFTER_FAIL_MS;
+    if (s_mqtt_pub_fail_streak >= 2) {
+      s_mqtt_pipeline_ok = false;
+      ESP_LOGW(TAG,
+               "MQTT modem publish stuck (%d fails) - scheduling pipeline reconnect",
+               s_mqtt_pub_fail_streak);
+    }
+    return;
   }
+
+  s_mqtt_pub_fail_streak = 0;
+  s_next_telemetry_attempt_ms = now_ms + TELEMETRY_MIN_OK_INTERVAL_MS;
+  ESP_LOGI(TAG, "Telemetry MQTT publish OK -> %s", MQTT_TOPIC_TELEMETRY);
 }
 
 /* --------- MQTT connect / subscribe (SIM7600-style CMQTT) --------- */
+
+/* --------- PDP wait — EPS / LTE often activates after CGACT OK (async URC) --------- */
+
+static bool pdp_context1_read_ip(char *ip_out, size_t ip_len)
+{
+  bool err = false;
+  uart_flush_rx();
+  modem_send_line("AT+CGPADDR=1");
+  if (!modem_drain_until("OK", 8000, &err) || err) {
+    return false;
+  }
+
+  const char *p = strstr(s_drain_buf, "+CGPADDR:");
+  if (p == NULL) {
+    return false;
+  }
+
+  int cid = -1;
+  char ip[48];
+  if (sscanf(p, "+CGPADDR: %d,%47[^,\r\n]", &cid, ip) < 2) {
+    return false;
+  }
+
+  if (strcmp(ip, "0.0.0.0") == 0 || strlen(ip) < 7) {
+    return false;
+  }
+
+  if (ip_out != NULL && ip_len > 0) {
+    strncpy(ip_out, ip, ip_len - 1);
+    ip_out[ip_len - 1] = '\0';
+  }
+
+  ESP_LOGI(TAG, "PDP context 1 IP: %s", ip);
+  return true;
+}
+
+/** Poll until PDP has a real IPv4 or timeout (CMQTTSTART needs live packet data). */
+static void wait_for_packet_data_ip(uint32_t max_wait_ms)
+{
+  const uint32_t step_ms = 750;
+  uint32_t waited = 0;
+
+  while (waited < max_wait_ms) {
+    char ip[48];
+    if (pdp_context1_read_ip(ip, sizeof(ip))) {
+      ESP_LOGI(TAG, "Packet data up; settling 3s before MQTT...");
+      vTaskDelay(pdMS_TO_TICKS(3000));
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(step_ms));
+    waited += step_ms;
+  }
+
+  ESP_LOGW(TAG,
+           "No PDP IPv4 after %u ms - MQTT often returns +CMQTTSTART: 1 until "
+           "registration completes",
+           (unsigned int)max_wait_ms);
+}
+
+static void modem_cmqtt_teardown_best_effort(void)
+{
+  bool err = false;
+  uart_flush_rx();
+  modem_send_line("AT+CMQTTDISC=0,0");
+  modem_drain_until("OK", 8000, &err);
+  uart_flush_rx();
+  modem_send_line("AT+CMQTTREL=0");
+  modem_drain_until("OK", 8000, &err);
+  uart_flush_rx();
+  modem_send_line("AT+CMQTTSTOP");
+  modem_drain_until("OK", 25000, &err);
+  vTaskDelay(pdMS_TO_TICKS(1500));
+}
+
+/**
+ * Run AT+CMQTTSTART until result is +CMQTTSTART: 0 (success).
+ * Non-zero (e.g. : 1) is common if PDP is not ready yet — fixed by wait_for_packet_data_ip + retries.
+ */
+static bool modem_cmqtt_start_until_ok(void)
+{
+  for (int attempt = 0; attempt < 8; attempt++) {
+    if (attempt > 0) {
+      ESP_LOGW(TAG, "CMQTTSTART retry %d/7", attempt);
+      modem_cmqtt_teardown_best_effort();
+      wait_for_packet_data_ip(45000);
+    }
+
+    bool err = false;
+    uart_flush_rx();
+    modem_send_line("AT+CMQTTSTART");
+    if (!modem_drain_until("+CMQTTSTART:", 90000, &err)) {
+      ESP_LOGW(TAG, "CMQTTSTART timeout (attempt %d)", attempt);
+      vTaskDelay(pdMS_TO_TICKS(4000));
+      continue;
+    }
+
+    if (strstr(s_drain_buf, "+CMQTTSTART: 0") != NULL) {
+      ESP_LOGI(TAG, "CMQTTSTART OK");
+      return true;
+    }
+
+    ESP_LOGW(TAG, "CMQTTSTART failed (want : 0): %s", s_drain_buf);
+    vTaskDelay(pdMS_TO_TICKS(4000));
+  }
+
+  return false;
+}
 
 static bool mqtt_stack_start_and_connect(void)
 {
@@ -459,14 +649,13 @@ static bool mqtt_stack_start_and_connect(void)
     modem_drain_until("OK", 5000, &err);
   }
 
-  uart_flush_rx();
-  modem_send_line("AT+CMQTTSTART");
-  if (!modem_drain_until("+CMQTTSTART:", 45000, &err)) {
-    ESP_LOGE(TAG, "CMQTTSTART failed / timeout");
+  modem_cmqtt_teardown_best_effort();
+
+  wait_for_packet_data_ip(120000);
+
+  if (!modem_cmqtt_start_until_ok()) {
+    ESP_LOGE(TAG, "CMQTTSTART never succeeded - check SIM/APN and PDP");
     return false;
-  }
-  if (strstr(s_drain_buf, "+CMQTTSTART: 0") == NULL) {
-    ESP_LOGW(TAG, "CMQTTSTART buf: %s", s_drain_buf);
   }
 
   char accq[80];
@@ -474,7 +663,7 @@ static bool mqtt_stack_start_and_connect(void)
            MQTT_CLIENT_ID);
   uart_flush_rx();
   modem_send_line(accq);
-  if (!modem_drain_until("OK", 10000, &err)) {
+  if (!modem_drain_until("OK", 10000, &err) || err) {
     ESP_LOGE(TAG, "CMQTTACCQ failed");
     return false;
   }
@@ -505,12 +694,8 @@ static bool mqtt_stack_start_and_connect(void)
     return false;
   }
 
-  bool sub_ok = false;
   modem_drain_until("+CMQTTSUB:", 10000, &err);
-  if (strstr(s_drain_buf, "+CMQTTSUB: 0,0")) {
-    sub_ok = true;
-  }
-  if (!sub_ok) {
+  if (strstr(s_drain_buf, "+CMQTTSUB: 0,0") == NULL) {
     ESP_LOGW(TAG, "CMQTTSUB response: %s", s_drain_buf);
   }
 
@@ -557,24 +742,55 @@ void app_main(void)
   send_at_command("AT+CGPADDR=1");
   read_response_log();
 
-  if (!mqtt_stack_start_and_connect()) {
-    ESP_LOGE(TAG, "MQTT setup aborted — fix APN / SIM / broker reachability");
+  s_mqtt_pipeline_ok = mqtt_stack_start_and_connect();
+  if (!s_mqtt_pipeline_ok) {
+    ESP_LOGE(TAG,
+             "MQTT setup failed - dashboard will stay empty until connect works");
   }
 
   send_at_command("AT+CGNSSPWR=1");
   read_response_log();
-  vTaskDelay(pdMS_TO_TICKS(3000));
+  ESP_LOGI(TAG, "Waiting for GNSS stack (+CGNSSPWR READY / UART URC)...");
+  for (int i = 0; i < 50; i++) {
+    poll_uart_background(200);
+  }
+
+  int mqtt_retry_loops = 0;
 
   while (1) {
     poll_uart_background(80);
 
+    /* Fast reconnect after modem RF/stack resets wedge CMQTT (> prompt missing). */
+    uint32_t mqtt_reconnect_loops =
+        (!s_mqtt_pipeline_ok && s_mqtt_pub_fail_streak >= 2) ? 4u : 18u;
+
+    if (!s_mqtt_pipeline_ok) {
+      if (++mqtt_retry_loops >= mqtt_reconnect_loops) {
+        mqtt_retry_loops = 0;
+        ESP_LOGW(TAG, "Reconnecting MQTT pipeline (fail_streak=%d)...",
+                 s_mqtt_pub_fail_streak);
+        if (mqtt_stack_start_and_connect()) {
+          s_mqtt_pipeline_ok = true;
+          s_mqtt_pub_fail_streak = 0;
+          s_next_telemetry_attempt_ms = 0;
+        } else {
+          s_mqtt_pipeline_ok = false;
+        }
+      }
+    } else {
+      mqtt_retry_loops = 0;
+    }
+
     send_at_command("AT+CSQ");
     read_response_log();
 
+    /* Publish telemetry before GNSS — CGNSSINFO ERROR bursts can break CMQTT AT. */
+    telemetry_publish_if_ready();
+
     send_at_command("AT+CGNSSINFO");
-    uint8_t data[384];
+    uint8_t data[512];
     int len = uart_read_bytes(MODEM_UART_NUM, data, sizeof(data) - 1,
-                              pdMS_TO_TICKS(1200));
+                              pdMS_TO_TICKS(1500));
     if (len > 0) {
       data[len] = '\0';
       ESP_LOGI(TAG, "GNSS rsp: %s", (char *)data);
@@ -582,8 +798,6 @@ void app_main(void)
       parse_csq_response((char *)data);
       feed_modem_bytes(data, (size_t)len);
     }
-
-    telemetry_publish_if_ready();
 
     poll_uart_background(200);
     vTaskDelay(pdMS_TO_TICKS(GNSS_POLL_INTERVAL_MS));

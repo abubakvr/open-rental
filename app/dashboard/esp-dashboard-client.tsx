@@ -14,6 +14,7 @@ type TelemetryRow = {
 type ApiBody = {
   ok: boolean;
   mqttConfigured: boolean;
+  pid?: number;
   data: TelemetryRow | null;
 };
 
@@ -51,7 +52,10 @@ export default function EspDashboardClient() {
 
   const fetchTelemetry = useCallback(async () => {
     try {
-      const res = await fetch("/api/esp/telemetry", { cache: "no-store" });
+      const res = await fetch(`/api/esp/telemetry?t=${Date.now()}`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = (await res.json()) as ApiBody;
       setBody(json);
@@ -100,6 +104,11 @@ export default function EspDashboardClient() {
         <div>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
             ESP controller
+            {body?.pid != null ? (
+              <span className="ml-2 font-mono text-xs opacity-70">
+                (api pid {body.pid})
+              </span>
+            ) : null}
           </p>
           <h1 className="text-2xl font-semibold tracking-tight">
             Telemetry dashboard

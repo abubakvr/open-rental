@@ -4,6 +4,7 @@ import { applyEspTelemetryPayload } from "@/lib/esp-telemetry-store";
 
 type GlobalMqtt = typeof globalThis & {
   __mqttAppStarted?: boolean;
+  __mqttNoUrlWarned?: boolean;
 };
 
 export function getTelemetryTopic(): string {
@@ -25,36 +26,54 @@ let client: MqttClient | null = null;
 export function ensureMqttApp(): void {
   const g = globalThis as GlobalMqtt;
   if (g.__mqttAppStarted) return;
-  g.__mqttAppStarted = true;
 
   const url = process.env.MQTT_URL?.trim();
   if (!url) {
-    console.warn("[mqtt] MQTT_URL is not set; broker features are disabled.");
+    if (!g.__mqttNoUrlWarned) {
+      g.__mqttNoUrlWarned = true;
+      console.warn("[mqtt] MQTT_URL is not set; broker features are disabled.");
+    }
     return;
   }
+
+  g.__mqttAppStarted = true;
 
   const user = process.env.MQTT_USER?.trim();
   const password = process.env.MQTT_PASSWORD?.trim();
 
   client = mqtt.connect(url, {
+    protocolVersion: 4,
     username: user || undefined,
     password: password || undefined,
     reconnectPeriod: 5_000,
     connectTimeout: 30_000,
+    clean: true,
+    resubscribe: true,
   });
 
   const topic = getTelemetryTopic();
 
   client.on("connect", () => {
-    client!.subscribe(topic, (err) => {
+    console.info("[mqtt] connected pid=%s", process.pid);
+    client!.subscribe(topic, { qos: 1 }, (err) => {
       if (err) console.error("[mqtt] subscribe failed:", err);
-      else console.info("[mqtt] subscribed:", topic);
+      else console.info("[mqtt] subscribed (qos1): %s pid=%s", topic, process.pid);
     });
   });
 
-  client.on("message", (_receivedTopic, payload) => {
+  client.on("message", (receivedTopic, payload) => {
     try {
-      applyEspTelemetryPayload(JSON.parse(payload.toString()));
+      const raw = payload.toString().trim();
+      const data = JSON.parse(raw) as unknown;
+      applyEspTelemetryPayload(data);
+      const row = JSON.stringify(data);
+      console.info(
+        "[mqtt] telemetry rx topic=%s pid=%s bytes=%d sample=%s",
+        receivedTopic,
+        process.pid,
+        raw.length,
+        row.length > 120 ? `${row.slice(0, 120)}…` : row,
+      );
     } catch (e) {
       console.error("[mqtt] telemetry parse error:", e);
     }

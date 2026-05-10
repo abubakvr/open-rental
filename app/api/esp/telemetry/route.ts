@@ -8,9 +8,18 @@ export const runtime = "nodejs";
 export async function GET() {
   ensureMqttApp();
   const data = getLatestEspTelemetry();
-  return NextResponse.json({
-    ok: true,
-    mqttConfigured: Boolean(process.env.MQTT_URL),
-    data,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      mqttConfigured: Boolean(process.env.MQTT_URL),
+      pid: process.pid,
+      data,
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        Pragma: "no-cache",
+      },
+    },
+  );
 }
