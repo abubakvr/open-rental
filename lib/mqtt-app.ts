@@ -1,6 +1,7 @@
 import mqtt, { type MqttClient } from "mqtt";
 
 import { applyEspTelemetryPayload } from "@/lib/esp-telemetry-store";
+import { applyModemReplyPayload } from "@/lib/modem-reply-store";
 
 type GlobalMqtt = typeof globalThis & {
   __mqttAppStarted?: boolean;
@@ -18,6 +19,12 @@ export function getTelemetryTopic(): string {
 export function getCommandsTopic(): string {
   return (
     process.env.MQTT_TOPIC_COMMANDS?.trim() || "open-rental/esp/commands"
+  );
+}
+
+export function getRepliesTopic(): string {
+  return (
+    process.env.MQTT_TOPIC_REPLIES?.trim() || "open-rental/esp/replies"
   );
 }
 
@@ -51,22 +58,48 @@ export function ensureMqttApp(): void {
     resubscribe: true,
   });
 
-  const topic = getTelemetryTopic();
+  const telemetryTopic = getTelemetryTopic();
+  const repliesTopic = getRepliesTopic();
 
   client.on("connect", () => {
     console.info("[mqtt] connected pid=%s", process.pid);
-    client!.subscribe(topic, { qos: 1 }, (err) => {
-      if (err) console.error("[mqtt] subscribe failed:", err);
-      else console.info("[mqtt] subscribed (qos1): %s pid=%s", topic, process.pid);
-    });
+    client!.subscribe(
+      {
+        [telemetryTopic]: { qos: 1 },
+        [repliesTopic]: { qos: 1 },
+      },
+      (err) => {
+        if (err) console.error("[mqtt] subscribe failed:", err);
+        else
+          console.info(
+            "[mqtt] subscribed (qos1): %s, %s pid=%s",
+            telemetryTopic,
+            repliesTopic,
+            process.pid,
+          );
+      },
+    );
   });
 
   client.on("message", (receivedTopic, payload) => {
     try {
       const raw = payload.toString().trim();
       const data = JSON.parse(raw) as unknown;
-      applyEspTelemetryPayload(data);
       const row = JSON.stringify(data);
+
+      if (receivedTopic === repliesTopic) {
+        applyModemReplyPayload(data);
+        console.info(
+          "[mqtt] reply rx topic=%s pid=%s bytes=%d sample=%s",
+          receivedTopic,
+          process.pid,
+          raw.length,
+          row.length > 120 ? `${row.slice(0, 120)}…` : row,
+        );
+        return;
+      }
+
+      applyEspTelemetryPayload(data);
       console.info(
         "[mqtt] telemetry rx topic=%s pid=%s bytes=%d sample=%s",
         receivedTopic,
@@ -75,7 +108,7 @@ export function ensureMqttApp(): void {
         row.length > 120 ? `${row.slice(0, 120)}…` : row,
       );
     } catch (e) {
-      console.error("[mqtt] telemetry parse error:", e);
+      console.error("[mqtt] message parse error:", e);
     }
   });
 

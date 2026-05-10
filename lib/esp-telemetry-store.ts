@@ -2,7 +2,10 @@ export type EspTelemetry = {
   lat: number;
   lng: number;
   uptimeSec: number;
+  /** Estimated RSSI in dBm when CSQ is known; null when unknown */
   rssi: number | null;
+  /** Raw GSM CSQ 0–31, or 99 when unknown (see AT+CSQ) */
+  csq: number | null;
   updatedAt: string;
 };
 
@@ -21,11 +24,23 @@ export function applyEspTelemetryPayload(data: unknown): void {
     ? Math.max(0, Math.floor(uptimeNum))
     : 0;
 
-  const rssiRaw = o.rssi ?? o.signal ?? o.wifiRssi ?? o.signalStrength;
+  let csq: number | null = null;
+  const csqRaw = o.csq ?? o.csqRaw ?? o.signalQuality;
+  if (csqRaw !== undefined && csqRaw !== null) {
+    const n = Number(csqRaw);
+    if (Number.isFinite(n)) csq = Math.floor(n);
+  }
+
   let rssi: number | null = null;
-  if (rssiRaw !== undefined && rssiRaw !== null) {
-    const n = Number(rssiRaw);
+  if (o.rssi === null || o.rssi === undefined) {
+    rssi = null;
+  } else {
+    const n = Number(o.rssi);
     if (Number.isFinite(n)) rssi = n;
+  }
+
+  if (rssi === null && csq !== null && csq >= 0 && csq <= 31) {
+    rssi = -113 + 2 * csq;
   }
 
   latest = {
@@ -33,6 +48,7 @@ export function applyEspTelemetryPayload(data: unknown): void {
     lng,
     uptimeSec,
     rssi,
+    csq,
     updatedAt: new Date().toISOString(),
   };
 }

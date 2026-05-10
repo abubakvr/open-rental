@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   getCommandsTopic,
+  getRepliesTopic,
   getTelemetryTopic,
 } from "@/lib/mqtt-app";
 
@@ -17,6 +18,7 @@ export async function GET() {
     mqtt: {
       telemetryTopic: getTelemetryTopic(),
       commandsTopic: getCommandsTopic(),
+      repliesTopic: getRepliesTopic(),
       port: 1883,
       note:
         "ESP connects to the broker at <YOUR_HOST>:1883 (same Wi‑Fi as the broker). Inside Docker Compose the app uses mqtt://mosquitto:1883; devices use your machine/router IP.",
@@ -28,7 +30,12 @@ export async function GET() {
       getTelemetry: "/api/esp/telemetry",
       postPublish: "/api/esp/publish",
       postLed: "/api/esp/led",
+      postModemUssd: "/api/esp/modem/ussd",
+      postModemSms: "/api/esp/modem/sms",
+      getModemReply: "/api/esp/modem/reply?requestId=",
       ledPayloadHint: '{ "on": true | false } publishes { cmd: "led", on } to commandsTopic',
+      modemPayloadHint:
+        'USSD: { cmd: "ussd", code: "*310#", requestId }; SMS: { cmd: "sms", to, text, requestId }; ESP publishes reply JSON to mqtt.repliesTopic',
     },
   });
 }

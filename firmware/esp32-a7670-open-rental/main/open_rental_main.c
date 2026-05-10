@@ -2,7 +2,9 @@
  * ESP32 + SIMCom A7670E — cellular MQTT (SIM7600-style AT+CMQTT*), GNSS telemetry,
  * and LED control via backend MQTT commands.
  *
- * Backend publishes: {"cmd":"led","on":true|false} on MQTT_TOPIC_COMMANDS.
+ * Backend publishes: {"cmd":"led","on":true|false}, {"cmd":"ussd","code":"*310#","requestId":"..."},
+ * {"cmd":"sms","to":"...","text":"...","requestId":"..."} on MQTT_TOPIC_COMMANDS.
+ * USSD/SMS replies are published as JSON on MQTT_TOPIC_REPLIES.
  * This device subscribes and toggles LED_GPIO_NUM.
  *
  * MQTT AT syntax follows SIM7500/SIM7600 MQTT AT Command Manual (many A7670 builds are compatible).
@@ -22,6 +24,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h"
 
 static const char *TAG = "OPEN_RENTAL";
 
@@ -32,6 +35,7 @@ static const char *TAG = "OPEN_RENTAL";
 
 #define MQTT_TOPIC_TELEMETRY "open-rental/esp/telemetry"
 #define MQTT_TOPIC_COMMANDS "open-rental/esp/commands"
+#define MQTT_TOPIC_REPLIES "open-rental/esp/replies"
 
 #define MQTT_CLIENT_ID "esp32-open-rental"
 
@@ -247,34 +251,131 @@ static void led_apply(bool on)
   ESP_LOGI(TAG, "LED %s", on ? "ON" : "OFF");
 }
 
+typedef enum {
+  PENDING_NONE = 0,
+  PENDING_USSD,
+  PENDING_SMS,
+} pending_kind_t;
+
+typedef struct {
+  pending_kind_t kind;
+  char request_id[48];
+  char ussd_code[48];
+  char sms_to[32];
+  char sms_text[280];
+} pending_modem_t;
+
+static pending_modem_t s_pending;
+static portMUX_TYPE s_pending_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static bool json_extract_str(const char *json, const char *key, char *out,
+                             size_t out_len)
+{
+  char pat[56];
+  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+  const char *p = strstr(json, pat);
+  if (!p) {
+    return false;
+  }
+  p += strlen(pat);
+  size_t i = 0;
+  while (*p && *p != '"' && i + 1 < out_len) {
+    out[i++] = *p++;
+  }
+  out[i] = '\0';
+  return i > 0;
+}
+
+static void sanitize_json_token_inplace(char *s)
+{
+  for (; *s; s++) {
+    if (*s == '"' || *s == '\\' || *s < 0x20) {
+      *s = '_';
+    }
+  }
+}
+
+static void queue_pending_ussd(const char *req_id, const char *code)
+{
+  taskENTER_CRITICAL(&s_pending_mux);
+  if (s_pending.kind != PENDING_NONE) {
+    taskEXIT_CRITICAL(&s_pending_mux);
+    ESP_LOGW(TAG, "USSD ignored (modem job already queued)");
+    return;
+  }
+  memset(&s_pending, 0, sizeof(s_pending));
+  snprintf(s_pending.request_id, sizeof(s_pending.request_id), "%s", req_id);
+  snprintf(s_pending.ussd_code, sizeof(s_pending.ussd_code), "%s", code);
+  s_pending.kind = PENDING_USSD;
+  taskEXIT_CRITICAL(&s_pending_mux);
+}
+
+static void queue_pending_sms(const char *req_id, const char *to,
+                              const char *text)
+{
+  taskENTER_CRITICAL(&s_pending_mux);
+  if (s_pending.kind != PENDING_NONE) {
+    taskEXIT_CRITICAL(&s_pending_mux);
+    ESP_LOGW(TAG, "SMS ignored (modem job already queued)");
+    return;
+  }
+  memset(&s_pending, 0, sizeof(s_pending));
+  snprintf(s_pending.request_id, sizeof(s_pending.request_id), "%s", req_id);
+  snprintf(s_pending.sms_to, sizeof(s_pending.sms_to), "%s", to);
+  snprintf(s_pending.sms_text, sizeof(s_pending.sms_text), "%s", text);
+  s_pending.kind = PENDING_SMS;
+  taskEXIT_CRITICAL(&s_pending_mux);
+}
+
 static void handle_mqtt_json_command(const char *json)
 {
-  /* Accept {"cmd":"led","on":true} from POST /api/esp/led */
   const bool wants_led =
       strstr(json, "\"cmd\"") && strstr(json, "\"led\"");
-  if (!wants_led) {
-    ESP_LOGW(TAG, "Unknown MQTT JSON (ignored): %s", json);
+  if (wants_led) {
+    if (strstr(json, "\"on\":true") || strstr(json, "\"on\": true")) {
+      led_apply(true);
+      return;
+    }
+    if (strstr(json, "\"on\":false") || strstr(json, "\"on\": false")) {
+      led_apply(false);
+      return;
+    }
+    if (strstr(json, "\"state\"") && strstr(json, "\"on\"")) {
+      led_apply(true);
+      return;
+    }
+    if (strstr(json, "\"state\"") && strstr(json, "\"off\"")) {
+      led_apply(false);
+      return;
+    }
+    ESP_LOGW(TAG, "LED JSON missing on/state: %s", json);
     return;
   }
 
-  if (strstr(json, "\"on\":true") || strstr(json, "\"on\": true")) {
-    led_apply(true);
-    return;
+  char req_id[48] = "unknown";
+  if (!json_extract_str(json, "requestId", req_id, sizeof(req_id))) {
+    snprintf(req_id, sizeof(req_id), "unknown");
   }
-  if (strstr(json, "\"on\":false") || strstr(json, "\"on\": false")) {
-    led_apply(false);
+
+  if (strstr(json, "\"cmd\"") && strstr(json, "\"ussd\"")) {
+    char code[48];
+    if (json_extract_str(json, "code", code, sizeof(code))) {
+      queue_pending_ussd(req_id, code);
+    }
     return;
   }
 
-  /* Optional: "state":"on" / "off" */
-  if (strstr(json, "\"state\"") && strstr(json, "\"on\"")) {
-    led_apply(true);
+  if (strstr(json, "\"cmd\"") && strstr(json, "\"sms\"")) {
+    char to[32];
+    char text[280];
+    if (json_extract_str(json, "to", to, sizeof(to)) &&
+        json_extract_str(json, "text", text, sizeof(text))) {
+      queue_pending_sms(req_id, to, text);
+    }
     return;
   }
-  if (strstr(json, "\"state\"") && strstr(json, "\"off\"")) {
-    led_apply(false);
-    return;
-  }
+
+  ESP_LOGW(TAG, "Unknown MQTT JSON (ignored): %s", json);
 }
 
 static void led_gpio_init(void)
@@ -414,7 +515,28 @@ static void parse_csq_response(const char *response)
   }
 }
 
-/** Rough GSM CSQ (0–31) → dBm estimate; 99 = unknown */
+/** Read AT+CSQ response and update s_last_csq (plain read_response_log does not). */
+static void read_response_log_csq(void)
+{
+  uint8_t data[320];
+  int len = uart_read_bytes(MODEM_UART_NUM, data, sizeof(data) - 1,
+                             pdMS_TO_TICKS(800));
+  if (len > 0) {
+    data[len] = '\0';
+    ESP_LOGI(TAG, "AT rsp: %s", (char *)data);
+    feed_modem_bytes(data, (size_t)len);
+    parse_csq_response((char *)data);
+  }
+}
+
+static void send_at_csq_query(void)
+{
+  uart_flush_rx();
+  modem_send_line("AT+CSQ");
+  read_response_log_csq();
+}
+
+/** Rough GSM CSQ (0–31) → dBm estimate; 99 or invalid → treat as unknown (-100 legacy). */
 static int csq_to_dbm_approx(int csq)
 {
   if (csq == 99 || csq < 0) {
@@ -482,6 +604,156 @@ static bool mqtt_publish_json_to_topic(const char *topic, const char *json_paylo
   return false;
 }
 
+static void json_escape_detail(const char *in, char *out, size_t out_sz)
+{
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j + 1 < out_sz; i++) {
+    unsigned char c = (unsigned char)in[i];
+    if (c == '"' || c == '\\') {
+      if (j + 2 >= out_sz) {
+        break;
+      }
+      out[j++] = '\\';
+      out[j++] = (char)c;
+    } else if (c == '\r' || c == '\n') {
+      if (j + 1 >= out_sz) {
+        break;
+      }
+      out[j++] = ' ';
+    } else if (c < 0x20) {
+      if (j + 1 >= out_sz) {
+        break;
+      }
+      out[j++] = '?';
+    } else {
+      out[j++] = (char)c;
+    }
+  }
+  out[j] = '\0';
+}
+
+static void publish_modem_reply(const char *request_id, const char *kind,
+                                bool ok, const char *detail_raw)
+{
+  if (!s_mqtt_pipeline_ok) {
+    ESP_LOGW(TAG, "Skip modem reply (MQTT pipeline down)");
+    return;
+  }
+
+  char rid_safe[48];
+  snprintf(rid_safe, sizeof(rid_safe), "%s",
+           request_id != NULL ? request_id : "unknown");
+  sanitize_json_token_inplace(rid_safe);
+
+  char esc[640];
+  json_escape_detail(detail_raw != NULL ? detail_raw : "", esc, sizeof(esc));
+
+  char body[860];
+  snprintf(body, sizeof(body),
+           "{\"requestId\":\"%s\",\"kind\":\"%s\",\"ok\":%s,\"detail\":\"%s\"}",
+           rid_safe, kind, ok ? "true" : "false", esc);
+
+  if (!mqtt_publish_json_to_topic(MQTT_TOPIC_REPLIES, body)) {
+    ESP_LOGW(TAG, "Modem reply MQTT publish failed");
+  }
+}
+
+static bool modem_run_ussd(const char *code, char *detail, size_t detail_len)
+{
+  bool err = false;
+  uart_flush_rx();
+
+  char cmd[96];
+  snprintf(cmd, sizeof(cmd), "AT+CUSD=1,\"%s\",15", code);
+  modem_send_line(cmd);
+
+  if (!modem_drain_until("+CUSD:", 55000, &err)) {
+    snprintf(detail, detail_len, "timeout waiting +CUSD: err=%d tail=%s",
+             err ? 1 : 0, s_drain_buf);
+    return false;
+  }
+
+  const char *p = strstr(s_drain_buf, "+CUSD:");
+  if (p != NULL) {
+    snprintf(detail, detail_len, "%s", p);
+  } else {
+    snprintf(detail, detail_len, "%s", s_drain_buf);
+  }
+
+  if (err || strstr(s_drain_buf, "\r\nERROR\r\n") != NULL) {
+    return false;
+  }
+  return true;
+}
+
+static bool modem_run_sms(const char *to, const char *text, char *detail,
+                          size_t detail_len)
+{
+  bool err = false;
+
+  uart_flush_rx();
+  modem_send_line("AT+CMGF=1");
+  if (!modem_drain_until("OK", 12000, &err) || err) {
+    snprintf(detail, detail_len, "AT+CMGF=1 failed: %s", s_drain_buf);
+    return false;
+  }
+
+  char hdr[48];
+  snprintf(hdr, sizeof(hdr), "AT+CMGS=\"%s\"", to);
+  uart_flush_rx();
+  modem_send_line(hdr);
+  if (!modem_wait_prompt(">", 25000)) {
+    snprintf(detail, detail_len, "no > after CMGS: %s", s_drain_buf);
+    return false;
+  }
+
+  uart_write_bytes(MODEM_UART_NUM, text, strlen(text));
+  uint8_t z = 0x1a;
+  uart_write_bytes(MODEM_UART_NUM, &z, 1);
+
+  if (!modem_drain_until("+CMGS:", 95000, &err)) {
+    snprintf(detail, detail_len, "SMS send timeout: %s", s_drain_buf);
+    return false;
+  }
+
+  snprintf(detail, detail_len, "%s", s_drain_buf);
+  if (strstr(s_drain_buf, "\r\nERROR\r\n") != NULL) {
+    return false;
+  }
+  return !err;
+}
+
+static void process_pending_modem_command(void)
+{
+  pending_modem_t job;
+
+  taskENTER_CRITICAL(&s_pending_mux);
+  if (s_pending.kind == PENDING_NONE) {
+    taskEXIT_CRITICAL(&s_pending_mux);
+    return;
+  }
+  job = s_pending;
+  memset(&s_pending, 0, sizeof(s_pending));
+  s_pending.kind = PENDING_NONE;
+  taskEXIT_CRITICAL(&s_pending_mux);
+
+  char detail[640];
+  bool ok = false;
+  const char *kind = "unknown";
+
+  if (job.kind == PENDING_USSD) {
+    kind = "ussd";
+    ok = modem_run_ussd(job.ussd_code, detail, sizeof(detail));
+  } else if (job.kind == PENDING_SMS) {
+    kind = "sms";
+    ok = modem_run_sms(job.sms_to, job.sms_text, detail, sizeof(detail));
+  } else {
+    return;
+  }
+
+  publish_modem_reply(job.request_id, kind, ok, detail);
+}
+
 static void telemetry_publish_if_ready(void)
 {
   if (!s_mqtt_pipeline_ok) {
@@ -501,10 +773,19 @@ static void telemetry_publish_if_ready(void)
 
   int64_t uptime_sec = esp_timer_get_time() / 1000000;
 
-  char body[256];
-  snprintf(body, sizeof(body),
-           "{\"lat\":%.7f,\"lng\":%.7f,\"uptimeSec\":%lld,\"rssi\":%d}", s_lat,
-           s_lng, (long long)uptime_sec, csq_to_dbm_approx(s_last_csq));
+  char body[320];
+  if (s_last_csq >= 0 && s_last_csq <= 31) {
+    int dbm = csq_to_dbm_approx(s_last_csq);
+    snprintf(body, sizeof(body),
+             "{\"lat\":%.7f,\"lng\":%.7f,\"uptimeSec\":%lld,\"csq\":%d,"
+             "\"rssi\":%d}",
+             s_lat, s_lng, (long long)uptime_sec, s_last_csq, dbm);
+  } else {
+    snprintf(body, sizeof(body),
+             "{\"lat\":%.7f,\"lng\":%.7f,\"uptimeSec\":%lld,\"csq\":%d,"
+             "\"rssi\":null}",
+             s_lat, s_lng, (long long)uptime_sec, s_last_csq);
+  }
 
   ESP_LOGI(TAG, "MQTT pub telemetry: %s", body);
 
@@ -727,8 +1008,7 @@ void app_main(void)
   send_at_command("AT");
   read_response_log();
 
-  send_at_command("AT+CSQ");
-  read_response_log();
+  send_at_csq_query();
 
   send_at_command("AT+CREG?");
   read_response_log();
@@ -760,6 +1040,8 @@ void app_main(void)
   while (1) {
     poll_uart_background(80);
 
+    process_pending_modem_command();
+
     /* Fast reconnect after modem RF/stack resets wedge CMQTT (> prompt missing). */
     uint32_t mqtt_reconnect_loops =
         (!s_mqtt_pipeline_ok && s_mqtt_pub_fail_streak >= 2) ? 4u : 18u;
@@ -781,8 +1063,7 @@ void app_main(void)
       mqtt_retry_loops = 0;
     }
 
-    send_at_command("AT+CSQ");
-    read_response_log();
+    send_at_csq_query();
 
     /* Publish telemetry before GNSS — CGNSSINFO ERROR bursts can break CMQTT AT. */
     telemetry_publish_if_ready();

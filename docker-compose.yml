@@ -17,6 +17,7 @@ services:
       MQTT_URL: mqtt://mosquitto:1883
       MQTT_TOPIC_TELEMETRY: open-rental/esp/telemetry
       MQTT_TOPIC_COMMANDS: open-rental/esp/commands
+      MQTT_TOPIC_REPLIES: open-rental/esp/replies
       # Optional: set so /api/esp/config documents your LAN URL for firmware
       # NEXT_PUBLIC_APP_URL: http://192.168.1.10:3909
     depends_on:
