@@ -70,6 +70,30 @@ export default function EspDashboardClient() {
   const data = body?.data ?? null;
   const mqttConfigured = body?.mqttConfigured ?? false;
 
+  const [ledBusy, setLedBusy] = useState(false);
+  const [ledMsg, setLedMsg] = useState<string | null>(null);
+
+  const sendLed = useCallback(async (on: boolean) => {
+    setLedBusy(true);
+    setLedMsg(null);
+    try {
+      const res = await fetch("/api/esp/led", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on }),
+      });
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      setLedMsg(on ? "LED on command sent." : "LED off command sent.");
+    } catch (e) {
+      setLedMsg(e instanceof Error ? e.message : "LED command failed");
+    } finally {
+      setLedBusy(false);
+    }
+  }, []);
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 py-10">
       <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
@@ -194,6 +218,43 @@ export default function EspDashboardClient() {
             </p>
           )}
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Remote LED (MQTT)
+        </h2>
+        <p className="mt-2 max-w-xl text-sm text-zinc-600 dark:text-zinc-400">
+          Sends{" "}
+          <code className="rounded bg-zinc-100 px-1 font-mono text-xs dark:bg-zinc-800">
+            {"{ \"cmd\": \"led\", \"on\": … }"}
+          </code>{" "}
+          on the commands topic. The ESP32 firmware must subscribe and drive
+          GPIO.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button
+            type="button"
+            disabled={ledBusy || !mqttConfigured}
+            onClick={() => void sendLed(true)}
+            className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            LED on
+          </button>
+          <button
+            type="button"
+            disabled={ledBusy || !mqttConfigured}
+            onClick={() => void sendLed(false)}
+            className="rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+          >
+            LED off
+          </button>
+        </div>
+        {ledMsg && (
+          <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
+            {ledMsg}
+          </p>
+        )}
       </section>
 
       <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">

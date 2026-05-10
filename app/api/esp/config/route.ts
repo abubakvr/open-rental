@@ -27,6 +27,8 @@ export async function GET() {
         "Set NEXT_PUBLIC_APP_URL (e.g. http://192.168.1.10:3909) for absolute URLs in clients.",
       getTelemetry: "/api/esp/telemetry",
       postPublish: "/api/esp/publish",
+      postLed: "/api/esp/led",
+      ledPayloadHint: '{ "on": true | false } publishes { cmd: "led", on } to commandsTopic',
     },
   });
 }

@@ -52,6 +52,8 @@ curl -s -X POST http://192.168.1.50:3909/api/esp/publish \
 3. **Subscribe** to `open-rental/esp/commands` to receive events from the backend.
 4. Optionally call `GET http://<YOUR_PC_LAN_IP>:3909/api/esp/config` to read topic names and paths at runtime.
 
+ESP32 with a SIMCOM-style modem over UART: step-by-step broker/topics/HTTP constants and payload signing notes are in [`docs/esp32-open-rental-connection.md`](docs/esp32-open-rental-connection.md). ESP-IDF sample firmware (A7670E, `AT+CMQTT*`, GNSS, LED): [`firmware/esp32-a7670-open-rental/README.md`](firmware/esp32-a7670-open-rental/README.md).
+
 ### Mosquitto configuration
 
 Dev-friendly settings live in `docker/mosquitto/mosquitto.conf` (anonymous access enabled). **Do not expose port 1883 to the internet** without TLS and authentication.
