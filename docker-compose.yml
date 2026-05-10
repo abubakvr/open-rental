@@ -11,14 +11,14 @@ services:
   web:
     build: .
     ports:
-      - "3000:3000"
+      - "3909:3000"
     environment:
       NODE_ENV: production
       MQTT_URL: mqtt://mosquitto:1883
       MQTT_TOPIC_TELEMETRY: open-rental/esp/telemetry
       MQTT_TOPIC_COMMANDS: open-rental/esp/commands
       # Optional: set so /api/esp/config documents your LAN URL for firmware
-      # NEXT_PUBLIC_APP_URL: http://192.168.1.10:3000
+      # NEXT_PUBLIC_APP_URL: http://192.168.1.10:3909
     depends_on:
       - mosquitto
     restart: unless-stopped

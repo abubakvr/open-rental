@@ -24,7 +24,7 @@ export async function GET() {
     http: {
       baseUrlHint:
         process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-        "Set NEXT_PUBLIC_APP_URL (e.g. http://192.168.1.10:3000) for absolute URLs in clients.",
+        "Set NEXT_PUBLIC_APP_URL (e.g. http://192.168.1.10:3909) for absolute URLs in clients.",
       getTelemetry: "/api/esp/telemetry",
       postPublish: "/api/esp/publish",
     },
