@@ -1,5 +1,6 @@
 import mqtt, { type MqttClient } from "mqtt";
 
+import { applyEspImuPayload } from "@/lib/esp-imu-store";
 import { applyEspTelemetryPayload } from "@/lib/esp-telemetry-store";
 import { applyModemReplyPayload } from "@/lib/modem-reply-store";
 
@@ -25,6 +26,13 @@ export function getCommandsTopic(): string {
 export function getRepliesTopic(): string {
   return (
     process.env.MQTT_TOPIC_REPLIES?.trim() || "open-rental/esp/replies"
+  );
+}
+
+/** ICM-20948 JSON from firmware (`MQTT_TOPIC_IMU` in device `config.h`). */
+export function getImuTopic(): string {
+  return (
+    process.env.MQTT_TOPIC_IMU?.trim() || "open-rental/esp/imu"
   );
 }
 
@@ -60,6 +68,7 @@ export function ensureMqttApp(): void {
 
   const telemetryTopic = getTelemetryTopic();
   const repliesTopic = getRepliesTopic();
+  const imuTopic = getImuTopic();
 
   client.on("connect", () => {
     console.info("[mqtt] connected pid=%s", process.pid);
@@ -67,14 +76,16 @@ export function ensureMqttApp(): void {
       {
         [telemetryTopic]: { qos: 1 },
         [repliesTopic]: { qos: 1 },
+        [imuTopic]: { qos: 0 },
       },
       (err) => {
         if (err) console.error("[mqtt] subscribe failed:", err);
         else
           console.info(
-            "[mqtt] subscribed (qos1): %s, %s pid=%s",
+            "[mqtt] subscribed: %s (qos1), %s (qos1), %s (qos0) pid=%s",
             telemetryTopic,
             repliesTopic,
+            imuTopic,
             process.pid,
           );
       },
@@ -91,6 +102,18 @@ export function ensureMqttApp(): void {
         applyModemReplyPayload(data);
         console.info(
           "[mqtt] reply rx topic=%s pid=%s bytes=%d sample=%s",
+          receivedTopic,
+          process.pid,
+          raw.length,
+          row.length > 120 ? `${row.slice(0, 120)}…` : row,
+        );
+        return;
+      }
+
+      if (receivedTopic === imuTopic) {
+        applyEspImuPayload(data);
+        console.info(
+          "[mqtt] imu rx topic=%s pid=%s bytes=%d sample=%s",
           receivedTopic,
           process.pid,
           raw.length,

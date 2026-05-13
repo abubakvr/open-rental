@@ -1,0 +1,2 @@
+# Default main stack is often ~3584 B; USSD/MQTT reply path nested locals exceeded it.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

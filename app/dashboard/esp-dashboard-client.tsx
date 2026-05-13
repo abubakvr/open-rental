@@ -281,12 +281,20 @@ export default function EspDashboardClient() {
             Telemetry dashboard
           </h1>
         </div>
-        <Link
-          href="/"
-          className="text-sm font-medium text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-300"
-        >
-          Back to home
-        </Link>
+        <div className="flex flex-wrap gap-3 sm:justify-end">
+          <Link
+            href="/dashboard/imu"
+            className="text-sm font-medium text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-300"
+          >
+            Live IMU
+          </Link>
+          <Link
+            href="/"
+            className="text-sm font-medium text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-300"
+          >
+            Back to home
+          </Link>
+        </div>
       </header>
 
       {!mqttConfigured && (

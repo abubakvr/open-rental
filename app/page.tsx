@@ -18,8 +18,9 @@ export default function Home() {
             Open Rental
           </h1>
           <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            ESP telemetry is available on the dashboard: coordinates, uptime
-            since reboot, and Wi‑Fi signal strength (fed by MQTT).
+            ESP telemetry is on the dashboard (coordinates, uptime, signal).
+            A separate page shows live IMU motion as a simple 3D figure over
+            MQTT.
           </p>
         </div>
         <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
@@ -28,6 +29,12 @@ export default function Home() {
             href="/dashboard"
           >
             Open dashboard
+          </Link>
+          <Link
+            className="flex h-12 w-full items-center justify-center gap-2 rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-auto md:min-w-[200px]"
+            href="/dashboard/imu"
+          >
+            Live IMU
           </Link>
           <a
             className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"

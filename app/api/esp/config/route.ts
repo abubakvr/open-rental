@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   getCommandsTopic,
+  getImuTopic,
   getRepliesTopic,
   getTelemetryTopic,
 } from "@/lib/mqtt-app";
@@ -17,6 +18,7 @@ export async function GET() {
     ok: true,
     mqtt: {
       telemetryTopic: getTelemetryTopic(),
+      imuTopic: getImuTopic(),
       commandsTopic: getCommandsTopic(),
       repliesTopic: getRepliesTopic(),
       port: 1883,
@@ -28,6 +30,8 @@ export async function GET() {
         process.env.NEXT_PUBLIC_APP_URL?.trim() ||
         "Set NEXT_PUBLIC_APP_URL (e.g. http://192.168.1.10:3909) for absolute URLs in clients.",
       getTelemetry: "/api/esp/telemetry",
+      getImu: "/api/esp/imu",
+      getImuStream: "/api/esp/imu/stream",
       postPublish: "/api/esp/publish",
       postLed: "/api/esp/led",
       postModemUssd: "/api/esp/modem/ussd",
