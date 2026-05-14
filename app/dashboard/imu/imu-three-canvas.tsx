@@ -5,6 +5,44 @@ import * as THREE from "three";
 
 import type { EspImuOrientation } from "@/lib/esp-imu-store";
 
+/** Billboard label; rotates with parent so you see device forward / top / etc. in scene space. */
+function createDirectionalLabelSprite(
+  text: string,
+  borderRgb: string,
+): THREE.Sprite {
+  const w = 280;
+  const h = 100;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("IMU canvas: 2d context unavailable");
+  }
+  ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = borderRgb;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, w - 4, h - 4);
+  ctx.fillStyle = "#f8fafc";
+  ctx.font = "600 40px system-ui, -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, w / 2, h / 2 + 2);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.58, 0.21, 1);
+  return sprite;
+}
+
 type Props = {
   orientation: EspImuOrientation | null;
   /** Increment to capture current sensor quaternion as rest (offset calibration). */
@@ -102,7 +140,69 @@ export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
     head.castShadow = true;
     head.position.y = 1.35;
 
-    figure.add(body, head);
+    /** Forward (+Z) and lateral (+X) cues so yaw (spin about body Y) is visible — capsule/sphere are symmetric about Y. */
+    const noseMat = new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      roughness: 0.45,
+      metalness: 0.08,
+    });
+    const nose = new THREE.Mesh(
+      new THREE.ConeGeometry(0.07, 0.22, 10, 1),
+      noseMat,
+    );
+    nose.castShadow = true;
+    nose.rotation.x = Math.PI / 2;
+    nose.position.set(0, 1.35, 0.21);
+
+    const wingMat = new THREE.MeshStandardMaterial({
+      color: 0x22c55e,
+      roughness: 0.5,
+      metalness: 0.06,
+    });
+    const wing = new THREE.Mesh(
+      new THREE.BoxGeometry(0.55, 0.06, 0.12),
+      wingMat,
+    );
+    wing.castShadow = true;
+    wing.position.set(0, 0.85, 0);
+
+    figure.add(body, head, nose, wing);
+
+    /* Six-way directions in figure space: +Y up (top), +Z forward (nose), +X right — matches Three.js / avatar rig. */
+    const gizmo = new THREE.Group();
+    gizmo.position.set(0, 0.92, 0);
+    figure.add(gizmo);
+
+    const centerDot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.055, 14, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: 0x444444,
+        emissiveIntensity: 0.35,
+        roughness: 0.35,
+        metalness: 0.15,
+      }),
+    );
+    centerDot.castShadow = true;
+    gizmo.add(centerDot);
+
+    const labelEntries: { text: string; pos: [number, number, number]; border: string }[] =
+      [
+        { text: "Top", pos: [0, 0.62, 0], border: "#fbbf24" },
+        { text: "Bottom", pos: [0, -0.62, 0], border: "#94a3b8" },
+        { text: "Forward", pos: [0, 0, 0.68], border: "#38bdf8" },
+        { text: "Back", pos: [0, 0, -0.68], border: "#64748b" },
+        { text: "Right", pos: [0.68, 0, 0], border: "#a78bfa" },
+        { text: "Left", pos: [-0.68, 0, 0], border: "#fb923c" },
+      ];
+
+    const directionSprites: THREE.Sprite[] = [];
+    for (const { text, pos, border } of labelEntries) {
+      const sp = createDirectionalLabelSprite(text, border);
+      sp.position.set(pos[0], pos[1], pos[2]);
+      gizmo.add(sp);
+      directionSprites.push(sp);
+    }
 
     const tmp = new THREE.Vector3();
     const identityQuat = new THREE.Quaternion(0, 0, 0, 1);
@@ -149,9 +249,21 @@ export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
       ro.disconnect();
       body.geometry.dispose();
       head.geometry.dispose();
+      nose.geometry.dispose();
+      wing.geometry.dispose();
+      centerDot.geometry.dispose();
+      (centerDot.material as THREE.MeshStandardMaterial).dispose();
       ground.geometry.dispose();
       (bodyMat as THREE.MeshStandardMaterial).dispose();
       (headMat as THREE.MeshStandardMaterial).dispose();
+      (noseMat as THREE.MeshStandardMaterial).dispose();
+      (wingMat as THREE.MeshStandardMaterial).dispose();
+      for (const sp of directionSprites) {
+        sp.geometry.dispose();
+        const m = sp.material as THREE.SpriteMaterial;
+        m.map?.dispose();
+        m.dispose();
+      }
       (ground.material as THREE.MeshStandardMaterial).dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
