@@ -1,20 +1,26 @@
 import { NextResponse } from "next/server";
 
-import { ensureMqttApp, getImuTopic } from "@/lib/mqtt-app";
-import { getLatestEspImu } from "@/lib/esp-imu-store";
+import {
+  ensureMqttApp,
+  getImuOrientationTopic,
+  getImuRawTopic,
+} from "@/lib/mqtt-app";
+import { getLatestEspImuOrientation } from "@/lib/esp-imu-store";
+import { getLatestEspImuRaw } from "@/lib/esp-imu-raw-store";
 
 export const runtime = "nodejs";
 
 export async function GET() {
   ensureMqttApp();
-  const data = getLatestEspImu();
   return NextResponse.json(
     {
       ok: true,
       mqttConfigured: Boolean(process.env.MQTT_URL),
-      topic: getImuTopic(),
+      topicOrientation: getImuOrientationTopic(),
+      topicRaw: getImuRawTopic(),
       pid: process.pid,
-      data,
+      data: getLatestEspImuOrientation(),
+      raw: getLatestEspImuRaw(),
     },
     {
       headers: {

@@ -1,6 +1,7 @@
 import mqtt, { type MqttClient } from "mqtt";
 
-import { applyEspImuPayload } from "@/lib/esp-imu-store";
+import { applyEspImuOrientationPayload } from "@/lib/esp-imu-store";
+import { applyEspImuRawPayload } from "@/lib/esp-imu-raw-store";
 import { applyEspTelemetryPayload } from "@/lib/esp-telemetry-store";
 import { applyModemReplyPayload } from "@/lib/modem-reply-store";
 
@@ -29,14 +30,40 @@ export function getRepliesTopic(): string {
   );
 }
 
-/** ICM-20948 JSON from firmware (`MQTT_TOPIC_IMU` in device `config.h`). */
-export function getImuTopic(): string {
+/** Fused quaternion JSON: qw,qx,qy,qz (Hamilton). */
+export function getImuOrientationTopic(): string {
   return (
-    process.env.MQTT_TOPIC_IMU?.trim() || "open-rental/esp/imu"
+    process.env.MQTT_TOPIC_IMU_ORIENTATION?.trim() ||
+    process.env.MQTT_TOPIC_IMU?.trim() ||
+    "device/imu/orientation"
+  );
+}
+
+/** Optional raw accel (g) + gyro (°/s). */
+export function getImuRawTopic(): string {
+  return (
+    process.env.MQTT_TOPIC_IMU_RAW?.trim() || "device/imu/raw"
   );
 }
 
 let client: MqttClient | null = null;
+
+function buildSubscribeMap(): Record<string, { qos: 0 | 1 | 2 }> {
+  const telemetryTopic = getTelemetryTopic();
+  const repliesTopic = getRepliesTopic();
+  const imuOrient = getImuOrientationTopic();
+  const imuRaw = getImuRawTopic();
+
+  const m: Record<string, { qos: 0 | 1 | 2 }> = {
+    [telemetryTopic]: { qos: 1 },
+    [repliesTopic]: { qos: 1 },
+    [imuOrient]: { qos: 0 },
+  };
+  if (imuRaw !== imuOrient) {
+    m[imuRaw] = { qos: 0 };
+  }
+  return m;
+}
 
 export function ensureMqttApp(): void {
   const g = globalThis as GlobalMqtt;
@@ -66,30 +93,21 @@ export function ensureMqttApp(): void {
     resubscribe: true,
   });
 
-  const telemetryTopic = getTelemetryTopic();
-  const repliesTopic = getRepliesTopic();
-  const imuTopic = getImuTopic();
+  const imuOrient = getImuOrientationTopic();
+  const imuRaw = getImuRawTopic();
 
   client.on("connect", () => {
+    const subs = buildSubscribeMap();
     console.info("[mqtt] connected pid=%s", process.pid);
-    client!.subscribe(
-      {
-        [telemetryTopic]: { qos: 1 },
-        [repliesTopic]: { qos: 1 },
-        [imuTopic]: { qos: 0 },
-      },
-      (err) => {
-        if (err) console.error("[mqtt] subscribe failed:", err);
-        else
-          console.info(
-            "[mqtt] subscribed: %s (qos1), %s (qos1), %s (qos0) pid=%s",
-            telemetryTopic,
-            repliesTopic,
-            imuTopic,
-            process.pid,
-          );
-      },
-    );
+    client!.subscribe(subs, (err) => {
+      if (err) console.error("[mqtt] subscribe failed:", err);
+      else
+        console.info(
+          "[mqtt] subscribed pid=%s topics=%s",
+          process.pid,
+          Object.keys(subs).join(", "),
+        );
+    });
   });
 
   client.on("message", (receivedTopic, payload) => {
@@ -98,7 +116,7 @@ export function ensureMqttApp(): void {
       const data = JSON.parse(raw) as unknown;
       const row = JSON.stringify(data);
 
-      if (receivedTopic === repliesTopic) {
+      if (receivedTopic === getRepliesTopic()) {
         applyModemReplyPayload(data);
         console.info(
           "[mqtt] reply rx topic=%s pid=%s bytes=%d sample=%s",
@@ -110,14 +128,23 @@ export function ensureMqttApp(): void {
         return;
       }
 
-      if (receivedTopic === imuTopic) {
-        applyEspImuPayload(data);
+      if (receivedTopic === imuOrient) {
+        applyEspImuOrientationPayload(data);
         console.info(
-          "[mqtt] imu rx topic=%s pid=%s bytes=%d sample=%s",
-          receivedTopic,
+          "[mqtt] imu/orientation rx pid=%s bytes=%d sample=%s",
           process.pid,
           raw.length,
           row.length > 120 ? `${row.slice(0, 120)}…` : row,
+        );
+        return;
+      }
+
+      if (receivedTopic === imuRaw) {
+        applyEspImuRawPayload(data);
+        console.info(
+          "[mqtt] imu/raw rx pid=%s bytes=%d",
+          process.pid,
+          raw.length,
         );
         return;
       }

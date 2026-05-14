@@ -3,19 +3,34 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 
-import type { EspImuSnapshot } from "@/lib/esp-imu-store";
+import type { EspImuOrientation } from "@/lib/esp-imu-store";
 
 type Props = {
-  imu: EspImuSnapshot | null;
+  orientation: EspImuOrientation | null;
+  /** Increment to capture current sensor quaternion as rest (offset calibration). */
+  zeroNonce: number;
 };
 
-/** Degrees per second → radians per second */
-const DEG2RAD = Math.PI / 180;
-
-export default function ImuThreeCanvas({ imu }: Props) {
+/**
+ * Applies fused quaternion from MQTT: THREE.Quaternion(x,y,z,w) with optional
+ * offset so the mesh rest pose matches the PCB (see docs).
+ */
+export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
-  const imuRef = useRef(imu);
-  imuRef.current = imu;
+  const orientationRef = useRef(orientation);
+  orientationRef.current = orientation;
+
+  const offsetQuatRef = useRef(new THREE.Quaternion());
+  const sensorQuatRef = useRef(new THREE.Quaternion());
+  const displayedQuatRef = useRef(new THREE.Quaternion());
+
+  useEffect(() => {
+    if (zeroNonce === 0) return;
+    const o = orientationRef.current;
+    if (!o) return;
+    const s = sensorQuatRef.current.set(o.qx, o.qy, o.qz, o.qw).normalize();
+    offsetQuatRef.current.copy(s).invert();
+  }, [zeroNonce]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -89,54 +104,30 @@ export default function ImuThreeCanvas({ imu }: Props) {
 
     figure.add(body, head);
 
-    const smooth = {
-      px: 0,
-      pz: 0,
-      pitch: 0,
-      roll: 0,
-      yaw: 0,
-      lastWallMs: performance.now(),
-    };
-
     const tmp = new THREE.Vector3();
-    const maxOffset = 1.35;
+    const identityQuat = new THREE.Quaternion(0, 0, 0, 1);
+    const lastWallMs = { v: performance.now() };
 
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const now = performance.now();
-      const dt = Math.min(0.05, (now - smooth.lastWallMs) / 1000);
-      smooth.lastWallMs = now;
+      const dt = Math.min(1 / 20, Math.max(1 / 240, (now - lastWallMs.v) / 1000));
+      lastWallMs.v = now;
 
-      const sample = imuRef.current;
-      if (sample) {
-        const { ax, ay, az, gx, gy, gz } = sample;
-        const roll = Math.atan2(ay, az);
-        const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
-
-        const targetX = THREE.MathUtils.clamp(ay * 2.2 + Math.sin(roll) * 0.45, -maxOffset, maxOffset);
-        const targetZ = THREE.MathUtils.clamp(ax * 2.0 + Math.sin(pitch) * 0.35, -maxOffset, maxOffset);
-
-        smooth.px = THREE.MathUtils.lerp(smooth.px, targetX, 0.08);
-        smooth.pz = THREE.MathUtils.lerp(smooth.pz, targetZ, 0.08);
-        smooth.pitch = THREE.MathUtils.lerp(smooth.pitch, pitch, 0.12);
-        smooth.roll = THREE.MathUtils.lerp(smooth.roll, roll, 0.12);
-        smooth.yaw += (gz * DEG2RAD * dt * 0.55 + gx * DEG2RAD * dt * 0.08);
-        smooth.yaw += (gy * DEG2RAD * dt * 0.04);
+      const o = orientationRef.current;
+      if (o) {
+        sensorQuatRef.current.set(o.qx, o.qy, o.qz, o.qw).normalize();
+        displayedQuatRef.current
+          .copy(offsetQuatRef.current)
+          .multiply(sensorQuatRef.current);
+        const alpha = THREE.MathUtils.clamp(dt * 28, 0.12, 0.92);
+        figure.quaternion.slerp(displayedQuatRef.current, alpha);
       } else {
-        smooth.px = THREE.MathUtils.lerp(smooth.px, 0, 0.04);
-        smooth.pz = THREE.MathUtils.lerp(smooth.pz, 0, 0.04);
-        smooth.pitch = THREE.MathUtils.lerp(smooth.pitch, 0, 0.04);
-        smooth.roll = THREE.MathUtils.lerp(smooth.roll, 0, 0.04);
-        smooth.yaw = THREE.MathUtils.lerp(smooth.yaw, 0, 0.02);
+        figure.quaternion.slerp(identityQuat, 1 - Math.exp(-dt * 2.5));
       }
 
-      figure.position.x = smooth.px;
-      figure.position.z = smooth.pz;
-      figure.rotation.order = "YXZ";
-      figure.rotation.set(smooth.pitch * 0.85, smooth.yaw, -smooth.roll * 0.9);
-
-      tmp.set(0, 0.9, 0).add(figure.position);
+      tmp.set(0, 0.9, 0);
       camera.lookAt(tmp);
 
       renderer.render(scene, camera);

@@ -1,21 +1,17 @@
-export type EspImuSnapshot = {
-  ax: number;
-  ay: number;
-  az: number;
-  aMag: number;
-  gx: number;
-  gy: number;
-  gz: number;
-  rax: number;
-  ray: number;
-  raz: number;
-  rgx: number;
-  rgy: number;
-  rgz: number;
+/**
+ * Fused IMU orientation from MQTT (Madgwick quaternion on the device).
+ * Default topic: device/imu/orientation — see docs/WEB_APP_IMU_ORIENTATION_THREEJS.md
+ */
+
+export type EspImuOrientation = {
+  qw: number;
+  qx: number;
+  qy: number;
+  qz: number;
   updatedAt: string;
 };
 
-let latest: EspImuSnapshot | null = null;
+let latest: EspImuOrientation | null = null;
 
 const listeners = new Set<(json: string) => void>();
 
@@ -23,37 +19,27 @@ function isFiniteNum(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
-function validateImu(data: unknown): Omit<EspImuSnapshot, "updatedAt"> | null {
+function validateOrientation(
+  data: unknown,
+): Omit<EspImuOrientation, "updatedAt"> | null {
   if (!data || typeof data !== "object") return null;
   const o = data as Record<string, unknown>;
-  const keys: (keyof Omit<EspImuSnapshot, "updatedAt">)[] = [
-    "ax",
-    "ay",
-    "az",
-    "aMag",
-    "gx",
-    "gy",
-    "gz",
-    "rax",
-    "ray",
-    "raz",
-    "rgx",
-    "rgy",
-    "rgz",
-  ];
-  const out: Partial<Omit<EspImuSnapshot, "updatedAt">> = {};
-  for (const k of keys) {
-    const n = Number(o[k]);
-    if (!isFiniteNum(n)) return null;
-    out[k] = n;
+  const qw = Number(o.qw);
+  const qx = Number(o.qx);
+  const qy = Number(o.qy);
+  const qz = Number(o.qz);
+  if (!isFiniteNum(qw) || !isFiniteNum(qx) || !isFiniteNum(qy) || !isFiniteNum(qz)) {
+    return null;
   }
-  return out as Omit<EspImuSnapshot, "updatedAt">;
+  const n = Math.hypot(qw, qx, qy, qz);
+  if (n < 0.25 || n > 4.0) return null;
+  return { qw, qx, qy, qz };
 }
 
-export function applyEspImuPayload(data: unknown): void {
-  const row = validateImu(data);
+export function applyEspImuOrientationPayload(data: unknown): void {
+  const row = validateOrientation(data);
   if (!row) return;
-  const snapshot: EspImuSnapshot = {
+  const snapshot: EspImuOrientation = {
     ...row,
     updatedAt: new Date().toISOString(),
   };
@@ -68,12 +54,13 @@ export function applyEspImuPayload(data: unknown): void {
   }
 }
 
-export function getLatestEspImu(): EspImuSnapshot | null {
+export function getLatestEspImuOrientation(): EspImuOrientation | null {
   return latest;
 }
 
-/** Subscribe to new IMU rows (JSON string per MQTT message). Returns unsubscribe. */
-export function subscribeEspImu(listener: (json: string) => void): () => void {
+export function subscribeEspImuOrientation(
+  listener: (json: string) => void,
+): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }

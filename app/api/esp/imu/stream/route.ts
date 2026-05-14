@@ -1,7 +1,7 @@
 import { ensureMqttApp } from "@/lib/mqtt-app";
 import {
-  getLatestEspImu,
-  subscribeEspImu,
+  getLatestEspImuOrientation,
+  subscribeEspImuOrientation,
 } from "@/lib/esp-imu-store";
 
 export const runtime = "nodejs";
@@ -30,14 +30,14 @@ export async function GET(req: Request) {
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const latest = getLatestEspImu();
+      const latest = getLatestEspImuOrientation();
       if (latest) {
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify(latest)}\n\n`),
         );
       }
 
-      state.unsub = subscribeEspImu((json) => {
+      state.unsub = subscribeEspImuOrientation((json) => {
         try {
           controller.enqueue(encoder.encode(`data: ${json}\n\n`));
         } catch {

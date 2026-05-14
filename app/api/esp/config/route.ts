@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 
 import {
   getCommandsTopic,
-  getImuTopic,
+  getImuOrientationTopic,
+  getImuRawTopic,
   getRepliesTopic,
   getTelemetryTopic,
 } from "@/lib/mqtt-app";
@@ -18,7 +19,8 @@ export async function GET() {
     ok: true,
     mqtt: {
       telemetryTopic: getTelemetryTopic(),
-      imuTopic: getImuTopic(),
+      imuOrientationTopic: getImuOrientationTopic(),
+      imuRawTopic: getImuRawTopic(),
       commandsTopic: getCommandsTopic(),
       repliesTopic: getRepliesTopic(),
       port: 1883,

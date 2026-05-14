@@ -4,23 +4,33 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import ImuThreeCanvas from "@/app/dashboard/imu/imu-three-canvas";
-import type { EspImuSnapshot } from "@/lib/esp-imu-store";
+import type { EspImuOrientation } from "@/lib/esp-imu-store";
+import type { EspImuRaw } from "@/lib/esp-imu-raw-store";
 
 type ApiBody = {
   ok: boolean;
   mqttConfigured: boolean;
-  topic: string;
+  topicOrientation: string;
+  topicRaw: string;
   pid?: number;
-  data: EspImuSnapshot | null;
+  data: EspImuOrientation | null;
+  raw: EspImuRaw | null;
 };
 
 export default function ImuLiveClient() {
-  const [imu, setImu] = useState<EspImuSnapshot | null>(null);
+  const [orientation, setOrientation] = useState<EspImuOrientation | null>(
+    null,
+  );
+  const [raw, setRaw] = useState<EspImuRaw | null>(null);
   const [mqttConfigured, setMqttConfigured] = useState(false);
-  const [topic, setTopic] = useState("open-rental/esp/imu");
+  const [topicOrientation, setTopicOrientation] = useState(
+    "device/imu/orientation",
+  );
+  const [topicRaw, setTopicRaw] = useState("device/imu/raw");
   const [pid, setPid] = useState<number | undefined>();
   const [sseOk, setSseOk] = useState<boolean | null>(null);
   const [sseError, setSseError] = useState<string | null>(null);
+  const [zeroNonce, setZeroNonce] = useState(0);
 
   useEffect(() => {
     void (async () => {
@@ -30,14 +40,34 @@ export default function ImuLiveClient() {
           headers: { Accept: "application/json" },
         });
         const json = (await res.json()) as ApiBody;
-        if (json.ok && json.data) setImu(json.data);
+        if (json.ok && json.data) setOrientation(json.data);
+        if (json.ok && json.raw) setRaw(json.raw);
         setMqttConfigured(json.mqttConfigured);
-        setTopic(json.topic);
+        setTopicOrientation(json.topicOrientation);
+        setTopicRaw(json.topicRaw);
         setPid(json.pid);
       } catch {
         /* initial snapshot optional */
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch(`/api/esp/imu?t=${Date.now()}`, {
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+          });
+          const json = (await res.json()) as ApiBody;
+          if (json.ok && json.raw) setRaw(json.raw);
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, 2000);
+    return () => window.clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -48,8 +78,15 @@ export default function ImuLiveClient() {
     };
     es.onmessage = (ev) => {
       try {
-        const row = JSON.parse(ev.data) as EspImuSnapshot;
-        if (typeof row.ax === "number") setImu(row);
+        const row = JSON.parse(ev.data) as EspImuOrientation;
+        if (
+          typeof row.qw === "number" &&
+          typeof row.qx === "number" &&
+          typeof row.qy === "number" &&
+          typeof row.qz === "number"
+        ) {
+          setOrientation(row);
+        }
       } catch {
         /* ignore bad chunk */
       }
@@ -66,9 +103,9 @@ export default function ImuLiveClient() {
       <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            ICM-20948 · MQTT topic{" "}
+            Madgwick quaternion ·{" "}
             <code className="rounded bg-zinc-200/80 px-1 py-0.5 font-mono text-xs dark:bg-zinc-800">
-              {topic}
+              {topicOrientation}
             </code>
             {pid != null ? (
               <span className="ml-2 font-mono text-xs opacity-70">
@@ -77,14 +114,23 @@ export default function ImuLiveClient() {
             ) : null}
           </p>
           <h1 className="text-2xl font-semibold tracking-tight">
-            Live IMU figure
+            Live IMU orientation
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">
-            Acceleration tilts and shifts the figure; gyro rates add gentle spin.
-            Updates follow the device publish interval (often about 3 seconds).
+            The mesh uses the fused quaternion from MQTT each tick (with slerp so
+            brief gaps do not snap). Yaw is not magnetically referenced in 6-DOF
+            mode—expect slow drift. Use &quot;Zero orientation&quot; with the
+            device in a known pose if the rest attitude does not match the model.
           </p>
         </div>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setZeroNonce((n) => n + 1)}
+            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm font-medium text-zinc-900 shadow-sm hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100 dark:hover:bg-zinc-700"
+          >
+            Zero orientation
+          </button>
           <Link
             href="/dashboard"
             className="text-sm font-medium text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-300"
@@ -108,12 +154,12 @@ export default function ImuLiveClient() {
           <strong className="font-medium">MQTT not configured.</strong> Set{" "}
           <code className="rounded bg-amber-100/80 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/50">
             MQTT_URL
-          </code>{" "}
-          and optionally{" "}
-          <code className="rounded bg-amber-100/80 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/50">
-            MQTT_TOPIC_IMU
-          </code>{" "}
-          (default <span className="font-mono">open-rental/esp/imu</span>).
+          </code>
+          . Topics default to{" "}
+          <span className="font-mono">device/imu/orientation</span> and{" "}
+          <span className="font-mono">device/imu/raw</span> (
+          <code className="font-mono text-xs">MQTT_TOPIC_IMU_ORIENTATION</code>,{" "}
+          <code className="font-mono text-xs">MQTT_TOPIC_IMU_RAW</code>).
         </div>
       )}
 
@@ -126,38 +172,73 @@ export default function ImuLiveClient() {
         </div>
       )}
 
-      <ImuThreeCanvas imu={imu} />
+      <ImuThreeCanvas orientation={orientation} zeroNonce={zeroNonce} />
 
       <section className="rounded-2xl border border-zinc-200 bg-zinc-50/90 p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900/50">
         <h2 className="mb-3 font-medium text-zinc-900 dark:text-zinc-100">
-          Latest sample
+          Latest orientation
         </h2>
-        {!imu ? (
+        {!orientation ? (
           <p className="text-zinc-600 dark:text-zinc-400">
-            Waiting for the first IMU message on{" "}
-            <span className="font-mono">{topic}</span>…
+            Waiting for the first message on{" "}
+            <span className="font-mono">{topicOrientation}</span>…
           </p>
         ) : (
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs sm:grid-cols-3 md:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs sm:grid-cols-4">
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">qw</dt>
+              <dd>{orientation.qw.toFixed(5)}</dd>
+            </div>
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">qx</dt>
+              <dd>{orientation.qx.toFixed(5)}</dd>
+            </div>
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">qy</dt>
+              <dd>{orientation.qy.toFixed(5)}</dd>
+            </div>
+            <div>
+              <dt className="text-zinc-500 dark:text-zinc-400">qz</dt>
+              <dd>{orientation.qz.toFixed(5)}</dd>
+            </div>
+            <div className="col-span-2 sm:col-span-4">
+              <dt className="text-zinc-500 dark:text-zinc-400">updatedAt</dt>
+              <dd className="break-all">{orientation.updatedAt}</dd>
+            </div>
+          </dl>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-zinc-200 bg-zinc-50/90 p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900/50">
+        <h2 className="mb-2 font-medium text-zinc-900 dark:text-zinc-100">
+          Optional raw stream
+        </h2>
+        <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-400">
+          Last sample from{" "}
+          <code className="rounded bg-zinc-200/80 px-1 dark:bg-zinc-800">
+            {topicRaw}
+          </code>{" "}
+          (only if your firmware publishes there).
+        </p>
+        {!raw ? (
+          <p className="text-zinc-600 dark:text-zinc-400">No raw sample yet.</p>
+        ) : (
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 font-mono text-xs sm:grid-cols-3">
             <div>
               <dt className="text-zinc-500 dark:text-zinc-400">ax, ay, az (g)</dt>
               <dd>
-                {imu.ax.toFixed(4)}, {imu.ay.toFixed(4)}, {imu.az.toFixed(4)}
+                {raw.ax.toFixed(4)}, {raw.ay.toFixed(4)}, {raw.az.toFixed(4)}
               </dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">aMag</dt>
-              <dd>{imu.aMag.toFixed(4)}</dd>
             </div>
             <div>
               <dt className="text-zinc-500 dark:text-zinc-400">gx, gy, gz (°/s)</dt>
               <dd>
-                {imu.gx.toFixed(2)}, {imu.gy.toFixed(2)}, {imu.gz.toFixed(2)}
+                {raw.gx.toFixed(2)}, {raw.gy.toFixed(2)}, {raw.gz.toFixed(2)}
               </dd>
             </div>
             <div>
               <dt className="text-zinc-500 dark:text-zinc-400">updatedAt</dt>
-              <dd className="break-all">{imu.updatedAt}</dd>
+              <dd className="break-all">{raw.updatedAt}</dd>
             </div>
           </dl>
         )}
