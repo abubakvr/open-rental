@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import ImuThreeCanvas from "@/app/dashboard/imu/imu-three-canvas";
 import type { EspImuOrientation } from "@/lib/esp-imu-store";
@@ -31,6 +31,8 @@ export default function ImuLiveClient() {
   const [sseOk, setSseOk] = useState<boolean | null>(null);
   const [sseError, setSseError] = useState<string | null>(null);
   const [zeroNonce, setZeroNonce] = useState(0);
+  /** Same samples as `orientation` state, updated synchronously so Three.js RAF is not one frame behind React. */
+  const orientationLiveRef = useRef<EspImuOrientation | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -40,7 +42,10 @@ export default function ImuLiveClient() {
           headers: { Accept: "application/json" },
         });
         const json = (await res.json()) as ApiBody;
-        if (json.ok && json.data) setOrientation(json.data);
+        if (json.ok && json.data) {
+          orientationLiveRef.current = json.data;
+          setOrientation(json.data);
+        }
         if (json.ok && json.raw) setRaw(json.raw);
         setMqttConfigured(json.mqttConfigured);
         setTopicOrientation(json.topicOrientation);
@@ -85,6 +90,7 @@ export default function ImuLiveClient() {
           typeof row.qy === "number" &&
           typeof row.qz === "number"
         ) {
+          orientationLiveRef.current = row;
           setOrientation(row);
         }
       } catch {
@@ -172,7 +178,11 @@ export default function ImuLiveClient() {
         </div>
       )}
 
-      <ImuThreeCanvas orientation={orientation} zeroNonce={zeroNonce} />
+      <ImuThreeCanvas
+        orientation={orientation}
+        orientationLiveRef={orientationLiveRef}
+        zeroNonce={zeroNonce}
+      />
 
       <section className="rounded-2xl border border-zinc-200 bg-zinc-50/90 p-4 text-sm shadow-sm dark:border-zinc-700 dark:bg-zinc-900/50">
         <h2 className="mb-3 font-medium text-zinc-900 dark:text-zinc-100">

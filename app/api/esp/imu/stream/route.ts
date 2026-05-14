@@ -65,6 +65,8 @@ export async function GET(req: Request) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      /** Lets reverse proxies flush each chunk immediately (matches ~100 ms IMU publishes). */
+      "X-Accel-Buffering": "no",
     },
   });
 }

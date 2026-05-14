@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
 
 import type { EspImuOrientation } from "@/lib/esp-imu-store";
@@ -45,6 +45,8 @@ function createDirectionalLabelSprite(
 
 type Props = {
   orientation: EspImuOrientation | null;
+  /** Latest fused sample; updated in the EventSource handler before setState so the render loop tracks ~MQTT rate (e.g. 10 Hz). */
+  orientationLiveRef: MutableRefObject<EspImuOrientation | null>;
   /** Increment to capture current sensor quaternion as rest (offset calibration). */
   zeroNonce: number;
 };
@@ -53,7 +55,11 @@ type Props = {
  * Applies fused quaternion from MQTT: THREE.Quaternion(x,y,z,w) with optional
  * offset so the mesh rest pose matches the PCB (see docs).
  */
-export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
+export default function ImuThreeCanvas({
+  orientation,
+  orientationLiveRef,
+  zeroNonce,
+}: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const orientationRef = useRef(orientation);
   orientationRef.current = orientation;
@@ -64,11 +70,11 @@ export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
 
   useEffect(() => {
     if (zeroNonce === 0) return;
-    const o = orientationRef.current;
+    const o = orientationLiveRef.current ?? orientationRef.current;
     if (!o) return;
     const s = sensorQuatRef.current.set(o.qx, o.qy, o.qz, o.qw).normalize();
     offsetQuatRef.current.copy(s).invert();
-  }, [zeroNonce]);
+  }, [zeroNonce, orientationLiveRef]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -215,14 +221,14 @@ export default function ImuThreeCanvas({ orientation, zeroNonce }: Props) {
       const dt = Math.min(1 / 20, Math.max(1 / 240, (now - lastWallMs.v) / 1000));
       lastWallMs.v = now;
 
-      const o = orientationRef.current;
+      const o = orientationLiveRef.current ?? orientationRef.current;
       if (o) {
         sensorQuatRef.current.set(o.qx, o.qy, o.qz, o.qw).normalize();
         displayedQuatRef.current
           .copy(offsetQuatRef.current)
           .multiply(sensorQuatRef.current);
-        const alpha = THREE.MathUtils.clamp(dt * 28, 0.12, 0.92);
-        figure.quaternion.slerp(displayedQuatRef.current, alpha);
+        /* Apply each sample at full rate (e.g. 10 Hz MQTT); heavy slerp would lag behind the stream. */
+        figure.quaternion.copy(displayedQuatRef.current);
       } else {
         figure.quaternion.slerp(identityQuat, 1 - Math.exp(-dt * 2.5));
       }
